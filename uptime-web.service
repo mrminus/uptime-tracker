@@ -1,0 +1,23 @@
+[Unit]
+Description=Uptime Tracker — Web Dashboard
+After=network.target uptime-pinger.service
+
+[Service]
+Type=simple
+User=uptime-tracker
+Group=uptime-tracker
+ExecStart=/opt/uptime-tracker/server.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+Environment=UPTIME_HOST=8.8.8.8
+Environment=UPTIME_DB=/opt/uptime-tracker/data/uptime.db
+Environment=UPTIME_CONFIG=/opt/uptime-tracker/config.json
+Environment=UPTIME_PORT=9090
+Environment=UPTIME_LATENCY_WARN=100
+Environment=UPTIME_LATENCY_CRIT=300
+
+[Install]
+WantedBy=multi-user.target

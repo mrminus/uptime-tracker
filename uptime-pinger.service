@@ -1,0 +1,24 @@
+[Unit]
+Description=Uptime Tracker — Ping Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uptime-tracker
+Group=uptime-tracker
+ExecStart=/opt/uptime-tracker/pinger.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+Environment=UPTIME_HOST=8.8.8.8
+Environment=UPTIME_DB=/opt/uptime-tracker/data/uptime.db
+Environment=UPTIME_CONFIG=/opt/uptime-tracker/config.json
+Environment=UPTIME_INTERVAL=5
+Environment=UPTIME_PACKETS=3
+Environment=UPTIME_RETENTION=7
+
+[Install]
+WantedBy=multi-user.target
