@@ -161,10 +161,19 @@ def get_stats(history: list) -> dict:
         else:
             in_outage = False
 
+    if all_max:
+        max_val = max(all_max)
+        max_row = next(r for r in history if r['max_ms'] is not None and round(r['max_ms'], 1) == round(max_val, 1))
+        max_ms_time = max_row['bucket']
+    else:
+        max_val = None
+        max_ms_time = None
+
     return {
         'uptime_pct':   round(up / total * 100, 2) if total else None,
         'avg_ms':       round(sum(all_avg) / len(all_avg), 1) if all_avg else None,
-        'max_ms':       round(max(all_max), 1) if all_max else None,
+        'max_ms':       round(max_val, 1) if max_val is not None else None,
+        'max_ms_time':  max_ms_time,
         'outage_count': outages,
         'total':        total,
     }
@@ -321,7 +330,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="card">
     <div class="card-label">Max Latency (24h)</div>
     <div class="card-value" id="stat-max">—</div>
-    <div class="card-sub">milliseconds</div>
+    <div class="card-sub" id="stat-max-sub">milliseconds</div>
   </div>
   <div class="card">
     <div class="card-label">Outages (24h)</div>
@@ -517,6 +526,8 @@ function updateStats(stats) {
   if (stats.max_ms !== null) {
     maxEl.textContent = stats.max_ms.toFixed(1);
     maxEl.className   = 'card-value ' + (stats.max_ms >= CRIT_MS ? 'red' : stats.max_ms >= WARN_MS ? 'yellow' : 'green');
+    document.getElementById('stat-max-sub').textContent =
+      stats.max_ms_time ? fmtDateTime(stats.max_ms_time) : 'milliseconds';
   }
 
   const outEl  = document.getElementById('stat-outages');
