@@ -19,6 +19,7 @@ Pings a host every 5 seconds, records latency and packet loss, and serves a live
 /home/<you>/uptime-tracker/          ← source / install files
     pinger.py                        ← ping daemon
     server.py                        ← web dashboard server
+    mcp_server.py                    ← MCP server (query data from Claude)
     uptime-pinger.service            ← systemd unit (pinger)
     uptime-web.service               ← systemd unit (web)
     install.sh                       ← one-shot installer
@@ -219,6 +220,67 @@ The current setup monitors one host. To monitor additional hosts:
 3. Run `sudo systemctl enable --now uptime-pinger2`
 
 The web server currently displays data for the single `UPTIME_HOST` set in its config. All hosts share the same database (filtered by the `host` column).
+
+---
+
+## MCP Server (query data from Claude)
+
+`mcp_server.py` is a [Model Context Protocol](https://modelcontextprotocol.io/) server that lets Claude query your ping data directly. Once connected, you can ask questions like:
+
+- *"Is 8.8.8.8 up right now?"*
+- *"What was the average latency over the last 6 hours?"*
+- *"Have there been any outages today?"*
+- *"Show me the worst latency spikes this week"*
+
+### Requirements
+
+```bash
+pip3 install mcp
+```
+
+### Tools exposed
+
+| Tool | Description |
+|---|---|
+| `get_status` | Current ping status — latency, packet loss, up/degraded/down |
+| `get_stats` | Summary stats over a time window: uptime %, avg/max latency, outage count |
+| `get_events` | Outage and degraded-service events, most recent first |
+| `get_history` | Full ping history with adaptive resolution (1-min averages beyond 1h, 5-sec raw for the last hour) |
+| `list_hosts` | All monitored hosts and which is currently active |
+
+### Connecting to Claude Desktop
+
+Add the following to `~/.config/Claude/claude_desktop_config.json` (create it if it doesn't exist), then restart Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "uptime-tracker": {
+      "command": "python3",
+      "args": ["/home/<you>/uptime-tracker/mcp_server.py"],
+      "env": {
+        "UPTIME_DB": "/opt/uptime-tracker/data/uptime.db"
+      }
+    }
+  }
+}
+```
+
+Replace `/home/<you>/uptime-tracker/mcp_server.py` with the actual path on your machine. If running the tracker locally for development, set `UPTIME_DB` to match (e.g. `/tmp/test.db`).
+
+### Running manually (test / debug)
+
+The MCP server speaks JSON-RPC over stdio, so you can exercise it via the MCP inspector:
+
+```bash
+npx @modelcontextprotocol/inspector python3 mcp_server.py
+```
+
+Or run the pinger and server locally and point the MCP server at the same test database:
+
+```bash
+UPTIME_DB=/tmp/test.db python3 mcp_server.py
+```
 
 ---
 
