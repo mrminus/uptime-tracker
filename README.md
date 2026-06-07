@@ -83,9 +83,27 @@ The page auto-refreshes every 5 seconds. No login is built in, so only expose it
 | Script | `/opt/uptime-tracker/pinger.py` |
 | Runs as | `uptime-tracker` (system user) |
 | Interval | Every 5 seconds |
-| Packets per sample | 3 (gives real min/avg/max per measurement) |
+| Packets per sample | 3 (min/avg/max are computed from received reply RTTs) |
 | What it stores | timestamp, min/avg/max latency (ms), packet loss %, packets sent/received |
 | Cleanup | Deletes records older than 7 days, runs hourly |
+
+#### How latency is measured
+
+The pinger uses the system `ping` binary, but it no longer depends on the final `rtt min/avg/max/mdev` summary line for latency. Each sample runs:
+
+```bash
+ping -n -D -c <packets> -i 0.3 -W 2 -- <host>
+```
+
+The flags matter:
+
+- `-n` keeps output numeric and avoids reverse-DNS formatting differences.
+- `-D` includes kernel timestamps on each reply line.
+- `-c` controls the packet count from `UPTIME_PACKETS`.
+- `-i 0.3` spaces packets 300 ms apart inside one sample.
+- `-W 2` waits up to 2 seconds for each reply.
+
+`pinger.py` parses each received reply's `time=... ms` value and computes min/avg/max from those per-packet RTTs. Packet loss and sent/received counts still come from the ping summary when available; if a summary is missing but reply lines were captured, received count and loss are derived from the parsed replies. With no replies, latency fields are stored as `NULL` and packet loss is treated as 100%.
 
 ### `uptime-web` — the dashboard server
 
@@ -144,7 +162,7 @@ sudo systemctl restart uptime-pinger uptime-web
 | `UPTIME_HOST` | `8.8.8.8` | Host or IP to ping |
 | `UPTIME_DB` | `/opt/uptime-tracker/data/uptime.db` | SQLite database path |
 | `UPTIME_INTERVAL` | `5` | Seconds between samples |
-| `UPTIME_PACKETS` | `3` | Packets sent per sample (gives real min/avg/max) |
+| `UPTIME_PACKETS` | `3` | Packets sent per sample (min/avg/max are computed from received replies) |
 | `UPTIME_RETENTION` | `7` | Days of data to keep |
 
 ### Web server options (`uptime-web.service`)

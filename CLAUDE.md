@@ -43,7 +43,7 @@ sudo systemctl daemon-reload && sudo systemctl restart uptime-pinger uptime-web
 Both scripts read the active host from `config.json` (default `/opt/uptime-tracker/config.json`) on every iteration, not just at startup. The web UI's `POST /api/config` writes this file; the pinger picks up the change within one polling interval (~5s) without restarting.
 
 ### `pinger.py`
-- Calls the system `ping` binary via `subprocess` and parses its stdout with regex
+- Calls the system `ping` binary via `subprocess` and parses per-packet reply RTTs with regex
 - Opens and closes a fresh SQLite connection per write (keeps the file unlocked between samples)
 - Runs hourly cleanup (every 720 ticks at 5s intervals) to delete records older than `UPTIME_RETENTION` days
 

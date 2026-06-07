@@ -93,23 +93,26 @@ def do_ping(host: str, count: int = 3):
     """Returns (min_ms, avg_ms, max_ms, packet_loss_pct, sent, recv)."""
     try:
         result = subprocess.run(
-            ['ping', '-c', str(count), '-i', '0.3', '-W', '2', '--', host],
+            ['ping', '-n', '-D', '-c', str(count), '-i', '0.3', '-W', '2', '--', host],
             capture_output=True,
             text=True,
             timeout=count * 3 + 2,
         )
         out = result.stdout
 
-        loss_m = re.search(r'(\d+(?:\.\d+)?)% packet loss', out)
-        packet_loss = float(loss_m.group(1)) if loss_m else 100.0
-
         seq_m = re.search(r'(\d+) packets transmitted, (\d+) (?:packets )?received', out)
         sent = int(seq_m.group(1)) if seq_m else count
-        recv = int(seq_m.group(2)) if seq_m else 0
+        rtts = [float(ms) for ms in re.findall(r'\btime[=<]([\d.]+)\s*ms\b', out)]
+        recv = int(seq_m.group(2)) if seq_m else len(rtts)
 
-        rtt_m = re.search(r'rtt min/avg/max/mdev = ([\d.]+)/([\d.]+)/([\d.]+)', out)
-        if rtt_m:
-            return float(rtt_m.group(1)), float(rtt_m.group(2)), float(rtt_m.group(3)), packet_loss, sent, recv
+        loss_m = re.search(r'(\d+(?:\.\d+)?)% packet loss', out)
+        packet_loss = float(loss_m.group(1)) if loss_m else ((sent - recv) * 100.0 / sent if sent else 100.0)
+
+        if rtts:
+            min_ms = min(rtts)
+            avg_ms = sum(rtts) / len(rtts)
+            max_ms = max(rtts)
+            return min_ms, avg_ms, max_ms, packet_loss, sent, recv
         return None, None, None, packet_loss, sent, recv
 
     except subprocess.TimeoutExpired:
