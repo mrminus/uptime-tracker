@@ -20,5 +20,10 @@ Environment=UPTIME_INTERVAL=5
 Environment=UPTIME_PACKETS=3
 Environment=UPTIME_RETENTION=7
 
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/uptime-tracker
+
 [Install]
 WantedBy=multi-user.target

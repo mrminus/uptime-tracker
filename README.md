@@ -58,13 +58,19 @@ The installer will:
 
 ## Accessing the Dashboard
 
-Open a browser on any machine on the same network:
+By default the dashboard binds to localhost for safety:
+
+```
+http://127.0.0.1:9090
+```
+
+To expose it on a trusted LAN, set `UPTIME_BIND=0.0.0.0` in `uptime-web.service`, then run `sudo systemctl daemon-reload && sudo systemctl restart uptime-web`. After that, open:
 
 ```
 http://<server-ip>:9090
 ```
 
-The page auto-refreshes every 5 seconds. No login required.
+The page auto-refreshes every 5 seconds. No login is built in, so only expose it on networks you trust.
 
 ---
 
@@ -87,6 +93,7 @@ The page auto-refreshes every 5 seconds. No login required.
 |---|---|
 | Script | `/opt/uptime-tracker/server.py` |
 | Runs as | `uptime-tracker` (system user) |
+| Bind address | `127.0.0.1` by default (`UPTIME_BIND`) |
 | Port | 9090 |
 | Endpoints | `GET /` — dashboard page, `GET /api/data` — JSON data |
 | No external process deps | Reads directly from the SQLite database |

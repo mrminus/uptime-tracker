@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import logging
+from ipaddress import ip_address
 
 DEFAULT_HOST  = os.environ.get('UPTIME_HOST', '8.8.8.8')
 DB_PATH       = os.environ.get('UPTIME_DB',     '/opt/uptime-tracker/data/uptime.db')
@@ -27,6 +28,11 @@ log = logging.getLogger(__name__)
 
 _running = True
 
+HOSTNAME_RE = re.compile(
+    r'^(?=.{1,253}\.?$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)'
+    r'(?:\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*\.?$'
+)
+
 
 def _stop(signum, frame):
     global _running
@@ -38,14 +44,32 @@ def read_host() -> str:
     try:
         if os.path.exists(CONFIG_PATH):
             with open(CONFIG_PATH) as f:
-                return json.load(f).get('host', DEFAULT_HOST)
-    except Exception:
-        pass
+                host = json.load(f).get('host', DEFAULT_HOST)
+                if is_valid_host(host):
+                    return host.strip()
+                log.warning('Ignoring invalid configured host %r', host)
+    except Exception as exc:
+        log.warning('Config read error: %s', exc)
     return DEFAULT_HOST
 
 
+def is_valid_host(host) -> bool:
+    if not isinstance(host, str):
+        return False
+    host = host.strip()
+    if not host or len(host) > 253 or host.startswith('-') or any(c.isspace() for c in host):
+        return False
+    try:
+        ip_address(host)
+        return True
+    except ValueError:
+        return bool(HOSTNAME_RE.fullmatch(host))
+
+
 def init_db(path: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    db_dir = os.path.dirname(path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute('''
         CREATE TABLE IF NOT EXISTS pings (
@@ -69,7 +93,7 @@ def do_ping(host: str, count: int = 3):
     """Returns (min_ms, avg_ms, max_ms, packet_loss_pct, sent, recv)."""
     try:
         result = subprocess.run(
-            ['ping', '-c', str(count), '-i', '0.3', '-W', '2', host],
+            ['ping', '-c', str(count), '-i', '0.3', '-W', '2', '--', host],
             capture_output=True,
             text=True,
             timeout=count * 3 + 2,

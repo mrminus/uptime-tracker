@@ -58,13 +58,16 @@ echo "==> Done."
 echo ""
 systemctl --no-pager status uptime-pinger.service uptime-web.service
 
-# Detect the machine's LAN IP for convenience
-LAN_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7; exit}')
-PORT=$(grep 'UPTIME_PORT' /etc/systemd/system/uptime-web.service | cut -d= -f2)
+PORT=$(grep 'UPTIME_PORT' /etc/systemd/system/uptime-web.service | cut -d= -f3)
 PORT=${PORT:-9090}
+BIND=$(grep 'UPTIME_BIND' /etc/systemd/system/uptime-web.service | cut -d= -f3)
+BIND=${BIND:-127.0.0.1}
 
 echo ""
-echo "Dashboard: http://${LAN_IP:-<your-ip>}:${PORT}"
+echo "Dashboard: http://${BIND}:${PORT}"
+if [[ "$BIND" == "127.0.0.1" || "$BIND" == "localhost" ]]; then
+  echo "    Bound to localhost by default. Set UPTIME_BIND=0.0.0.0 only on trusted networks."
+fi
 echo ""
 echo "Useful commands:"
 echo "  sudo journalctl -u uptime-pinger -f   # follow pinger log"

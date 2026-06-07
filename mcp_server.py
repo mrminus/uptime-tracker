@@ -4,9 +4,11 @@
 import asyncio
 import json
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime
+from ipaddress import ip_address
 
 import mcp.types as types
 from mcp.server import Server
@@ -15,9 +17,15 @@ from mcp.server.stdio import stdio_server
 DB_PATH     = os.environ.get('UPTIME_DB',     '/opt/uptime-tracker/data/uptime.db')
 CONFIG_PATH = os.environ.get('UPTIME_CONFIG', '/opt/uptime-tracker/config.json')
 DEFAULT_HOST = os.environ.get('UPTIME_HOST',  '8.8.8.8')
+INTERVAL     = int(os.environ.get('UPTIME_INTERVAL', '5'))
 
 LATENCY_WARN_MS = float(os.environ.get('UPTIME_LATENCY_WARN', '100'))
 LATENCY_CRIT_MS = float(os.environ.get('UPTIME_LATENCY_CRIT', '300'))
+
+HOSTNAME_RE = re.compile(
+    r'^(?=.{1,253}\.?$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)'
+    r'(?:\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*\.?$'
+)
 
 # ---------------------------------------------------------------------------
 # Data layer (mirrors server.py)
@@ -34,10 +42,25 @@ def _active_host() -> str:
         if os.path.exists(CONFIG_PATH):
             with open(CONFIG_PATH) as f:
                 cfg = json.load(f)
-                return cfg.get('host', DEFAULT_HOST)
+                host = cfg.get('host', DEFAULT_HOST)
+                if _is_valid_host(host):
+                    return host.strip()
     except Exception:
         pass
     return DEFAULT_HOST
+
+
+def _is_valid_host(host) -> bool:
+    if not isinstance(host, str):
+        return False
+    host = host.strip()
+    if not host or len(host) > 253 or host.startswith('-') or any(c.isspace() for c in host):
+        return False
+    try:
+        ip_address(host)
+        return True
+    except ValueError:
+        return bool(HOSTNAME_RE.fullmatch(host))
 
 
 def _known_hosts() -> list[str]:
@@ -99,18 +122,25 @@ def _history(host: str, hours: int = 24) -> list[dict]:
                MIN(CASE WHEN min_ms IS NOT NULL THEN min_ms END) AS min_ms,
                AVG(CASE WHEN avg_ms IS NOT NULL THEN avg_ms END) AS avg_ms,
                MAX(CASE WHEN max_ms IS NOT NULL THEN max_ms END) AS max_ms,
-               CAST(SUM(packets_sent - packets_recv) * 100.0
-                    / MAX(SUM(packets_sent), 1) AS REAL) AS packet_loss,
-               COUNT(*) AS samples
+               CASE WHEN SUM(packets_sent) > 0
+                    THEN CAST(SUM(packets_sent - packets_recv) * 100.0
+                              / SUM(packets_sent) AS REAL)
+                    ELSE 100.0
+               END AS packet_loss,
+               COUNT(*) AS samples,
+               SUM(packets_sent) AS packets_sent,
+               SUM(packets_recv) AS packets_recv,
+               60 AS interval_s
            FROM pings
            WHERE timestamp > ? AND timestamp <= ? AND host = ?
            GROUP BY bucket ORDER BY bucket''',
         (since, one_hour_ago, host),
     ).fetchall()
     recent = conn.execute(
-        '''SELECT timestamp AS bucket, min_ms, avg_ms, max_ms, packet_loss, 1 AS samples
+        '''SELECT timestamp AS bucket, min_ms, avg_ms, max_ms, packet_loss,
+                  1 AS samples, packets_sent, packets_recv, ? AS interval_s
            FROM pings WHERE timestamp > ? AND host = ? ORDER BY timestamp''',
-        (one_hour_ago, host),
+        (INTERVAL, one_hour_ago, host),
     ).fetchall()
     conn.close()
     return [dict(r) for r in older] + [dict(r) for r in recent]
@@ -120,9 +150,11 @@ def _stats(history: list[dict]) -> dict:
     if not history:
         return {'uptime_pct': None, 'avg_ms': None, 'max_ms': None,
                 'outage_count': 0, 'total_samples': 0}
-    total   = len(history)
-    up      = sum(1 for r in history if r['packet_loss'] < 100)
-    all_avg = [r['avg_ms'] for r in history if r['avg_ms'] is not None]
+    total   = sum(int(r.get('samples') or 1) for r in history)
+    sent    = sum(int(r.get('packets_sent') or 0) for r in history)
+    recv    = sum(int(r.get('packets_recv') or 0) for r in history)
+    avg_rows = [(r['avg_ms'], int(r.get('samples') or 1))
+                for r in history if r['avg_ms'] is not None]
     all_max = [r['max_ms'] for r in history if r['max_ms'] is not None]
     outages, in_outage = 0, False
     for r in history:
@@ -133,8 +165,9 @@ def _stats(history: list[dict]) -> dict:
         else:
             in_outage = False
     return {
-        'uptime_pct':    round(up / total * 100, 2) if total else None,
-        'avg_ms':        round(sum(all_avg) / len(all_avg), 1) if all_avg else None,
+        'uptime_pct':    round(recv / sent * 100, 2) if sent else None,
+        'avg_ms':        round(sum(avg * samples for avg, samples in avg_rows)
+                               / sum(samples for _, samples in avg_rows), 1) if avg_rows else None,
         'max_ms':        round(max(all_max), 1) if all_max else None,
         'outage_count':  outages,
         'total_samples': total,
@@ -146,18 +179,19 @@ def _events(history: list[dict]) -> list[dict]:
     for bucket in history:
         loss = bucket['packet_loss']
         ts   = bucket['bucket']
+        interval_s = int(bucket.get('interval_s') or 60)
         if loss > 0:
             if current is None:
                 current = {
                     'start':    ts,
                     'start_utc': datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S UTC'),
-                    'end':      ts + 60,
+                    'end':      ts + interval_s,
                     'max_loss': loss,
                     'kind':     'outage' if loss >= 100 else 'degraded',
                     'samples':  1,
                 }
             else:
-                current['end']      = ts + 60
+                current['end']      = ts + interval_s
                 current['max_loss'] = max(current['max_loss'], loss)
                 current['samples'] += 1
                 if loss >= 100:
@@ -295,6 +329,8 @@ async def handle_call_tool(
 
     if name == "get_status":
         host   = arguments.get("host") or _active_host()
+        if not _is_valid_host(host):
+            return text({"error": "valid hostname or IP address required"})
         result = _current(host)
         if result is None:
             return text({"error": f"No data found for host '{host}'. Is the pinger running?"})
@@ -302,6 +338,8 @@ async def handle_call_tool(
 
     if name in ("get_stats", "get_events", "get_history"):
         host  = arguments.get("host") or _active_host()
+        if not _is_valid_host(host):
+            return text({"error": "valid hostname or IP address required"})
         hours = min(int(arguments.get("hours", 24)), 168)
         hist  = _history(host, hours)
         if not hist:

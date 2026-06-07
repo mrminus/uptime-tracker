@@ -3,17 +3,26 @@
 
 import json
 import os
+import re
 import sqlite3
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from ipaddress import ip_address
 from urllib.parse import urlparse
 
 DB_PATH       = os.environ.get('UPTIME_DB',     '/opt/uptime-tracker/data/uptime.db')
 CONFIG_PATH   = os.environ.get('UPTIME_CONFIG', '/opt/uptime-tracker/config.json')
 DEFAULT_HOST  = os.environ.get('UPTIME_HOST',   '8.8.8.8')
+BIND_ADDRESS  = os.environ.get('UPTIME_BIND',   '127.0.0.1')
 PORT          = int(os.environ.get('UPTIME_PORT', '9090'))
+INTERVAL      = int(os.environ.get('UPTIME_INTERVAL', '5'))
 LATENCY_WARN_MS = float(os.environ.get('UPTIME_LATENCY_WARN', '100'))
 LATENCY_CRIT_MS = float(os.environ.get('UPTIME_LATENCY_CRIT', '300'))
+
+HOSTNAME_RE = re.compile(
+    r'^(?=.{1,253}\.?$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)'
+    r'(?:\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*\.?$'
+)
 
 PRESETS = [
     {'value': '8.8.8.8', 'label': '8.8.8.8 — Google DNS'},
@@ -31,19 +40,38 @@ def get_config() -> dict:
         if os.path.exists(CONFIG_PATH):
             with open(CONFIG_PATH) as f:
                 cfg = json.load(f)
-                if 'host' in cfg:
+                host = cfg.get('host')
+                if is_valid_host(host):
                     return cfg
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f'Config read error: {exc}', flush=True)
     return {'host': DEFAULT_HOST}
 
 
+def is_valid_host(host) -> bool:
+    if not isinstance(host, str):
+        return False
+    host = host.strip()
+    if not host or len(host) > 253 or host.startswith('-') or any(c.isspace() for c in host):
+        return False
+    try:
+        ip_address(host)
+        return True
+    except ValueError:
+        return bool(HOSTNAME_RE.fullmatch(host))
+
+
 def write_config(host: str) -> None:
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    config_dir = os.path.dirname(CONFIG_PATH) or '.'
+    os.makedirs(config_dir, exist_ok=True)
     cfg = get_config()
     cfg['host'] = host
-    with open(CONFIG_PATH, 'w') as f:
+    tmp_path = f'{CONFIG_PATH}.tmp'
+    with open(tmp_path, 'w') as f:
         json.dump(cfg, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, CONFIG_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -117,9 +145,15 @@ def get_history(host: str, hours: int = 24) -> list:
                MIN(CASE WHEN min_ms IS NOT NULL THEN min_ms END) AS min_ms,
                AVG(CASE WHEN avg_ms IS NOT NULL THEN avg_ms END) AS avg_ms,
                MAX(CASE WHEN max_ms IS NOT NULL THEN max_ms END) AS max_ms,
-               CAST(SUM(packets_sent - packets_recv) * 100.0
-                    / MAX(SUM(packets_sent), 1) AS REAL) AS packet_loss,
-               COUNT(*) AS samples
+               CASE WHEN SUM(packets_sent) > 0
+                    THEN CAST(SUM(packets_sent - packets_recv) * 100.0
+                              / SUM(packets_sent) AS REAL)
+                    ELSE 100.0
+               END AS packet_loss,
+               COUNT(*) AS samples,
+               SUM(packets_sent) AS packets_sent,
+               SUM(packets_recv) AS packets_recv,
+               60 AS interval_s
            FROM pings
            WHERE timestamp > ? AND timestamp <= ? AND host = ?
            GROUP BY bucket
@@ -131,11 +165,14 @@ def get_history(host: str, hours: int = 24) -> list:
         '''SELECT
                timestamp AS bucket,
                min_ms, avg_ms, max_ms, packet_loss,
-               1 AS samples
+               1 AS samples,
+               packets_sent,
+               packets_recv,
+               ? AS interval_s
            FROM pings
            WHERE timestamp > ? AND host = ?
            ORDER BY timestamp''',
-        (one_hour_ago, host),
+        (INTERVAL, one_hour_ago, host),
     ).fetchall()
 
     conn.close()
@@ -147,9 +184,11 @@ def get_stats(history: list) -> dict:
         return {'uptime_pct': None, 'avg_ms': None, 'max_ms': None,
                 'outage_count': 0, 'total': 0}
 
-    total    = len(history)
-    up       = sum(1 for r in history if r['packet_loss'] < 100)
-    all_avg  = [r['avg_ms'] for r in history if r['avg_ms'] is not None]
+    total    = sum(int(r.get('samples') or 1) for r in history)
+    sent     = sum(int(r.get('packets_sent') or 0) for r in history)
+    recv     = sum(int(r.get('packets_recv') or 0) for r in history)
+    avg_rows = [(r['avg_ms'], int(r.get('samples') or 1))
+                for r in history if r['avg_ms'] is not None]
     all_max  = [r['max_ms'] for r in history if r['max_ms'] is not None]
 
     outages, in_outage = 0, False
@@ -170,8 +209,9 @@ def get_stats(history: list) -> dict:
         max_ms_time = None
 
     return {
-        'uptime_pct':   round(up / total * 100, 2) if total else None,
-        'avg_ms':       round(sum(all_avg) / len(all_avg), 1) if all_avg else None,
+        'uptime_pct':   round(recv / sent * 100, 2) if sent else None,
+        'avg_ms':       round(sum(avg * samples for avg, samples in avg_rows)
+                              / sum(samples for _, samples in avg_rows), 1) if avg_rows else None,
         'max_ms':       round(max_val, 1) if max_val is not None else None,
         'max_ms_time':  max_ms_time,
         'outage_count': outages,
@@ -184,17 +224,18 @@ def get_events(history: list) -> list:
     for bucket in history:
         loss = bucket['packet_loss']
         ts   = bucket['bucket']
+        interval_s = int(bucket.get('interval_s') or 60)
         if loss > 0:
             if current is None:
                 current = {
                     'start':    ts,
-                    'end':      ts + 60,
+                    'end':      ts + interval_s,
                     'max_loss': loss,
                     'kind':     'outage' if loss >= 100 else 'degraded',
                     'samples':  1,
                 }
             else:
-                current['end']      = ts + 60
+                current['end']      = ts + interval_s
                 current['max_loss'] = max(current['max_loss'], loss)
                 current['samples'] += 1
                 if loss >= 100:
@@ -855,8 +896,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 body = json.loads(self.rfile.read(length))
                 host = str(body.get('host', '')).strip()
-                if not host:
-                    self.send_json({'error': 'host required'}, 400)
+                if not is_valid_host(host):
+                    self.send_json({'error': 'valid hostname or IP address required'}, 400)
                     return
                 write_config(host)
                 cfg = get_config()
@@ -871,8 +912,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    httpd = HTTPServer(('0.0.0.0', PORT), Handler)
-    print(f'Dashboard running on http://0.0.0.0:{PORT}  (db={DB_PATH})', flush=True)
+    httpd = HTTPServer((BIND_ADDRESS, PORT), Handler)
+    print(f'Dashboard running on http://{BIND_ADDRESS}:{PORT}  (db={DB_PATH})', flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
