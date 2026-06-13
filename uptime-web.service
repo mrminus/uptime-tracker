@@ -15,7 +15,7 @@ StandardError=journal
 Environment=UPTIME_HOST=8.8.8.8
 Environment=UPTIME_DB=/opt/uptime-tracker/data/uptime.db
 Environment=UPTIME_CONFIG=/opt/uptime-tracker/config.json
-Environment=UPTIME_BIND=127.0.0.1
+Environment=UPTIME_BIND=0.0.0.0
 Environment=UPTIME_PORT=9090
 Environment=UPTIME_INTERVAL=5
 Environment=UPTIME_LATENCY_WARN=100
