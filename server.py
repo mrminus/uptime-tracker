@@ -6,7 +6,7 @@ import os
 import re
 import sqlite3
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
 from urllib.parse import urlparse
 
@@ -911,8 +911,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+class DashboardServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 64
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(10)
+        return request, client_address
+
+
 def main():
-    httpd = HTTPServer((BIND_ADDRESS, PORT), Handler)
+    httpd = DashboardServer((BIND_ADDRESS, PORT), Handler)
     print(f'Dashboard running on http://{BIND_ADDRESS}:{PORT}  (db={DB_PATH})', flush=True)
     try:
         httpd.serve_forever()
